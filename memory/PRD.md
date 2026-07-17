@@ -1,53 +1,36 @@
-# Job Recipe – Product Requirements Doc
+# Job Recipe – PRD
 
-## Original Problem Statement
-AI-powered career development platform combining LinkedIn + Indeed + ChatGPT + LeetCode + InterviewBit. Helps students/freshers/professionals discover jobs, improve resumes, close skill gaps, prep for interviews, track growth. Dark mode + orange, glassmorphism, premium responsive UI.
-
-## Architecture
-- Frontend: React 19 + Tailwind + Framer Motion + shadcn/ui (dark theme, black bg, orange #FF5A1F accent, Clash Display + Satoshi fonts from Fontshare)
-- Backend: FastAPI + Motor (MongoDB) + emergentintegrations (Gemini 3 Flash) + JWT + bcrypt
-- Auth: Email/password (JWT) + Emergent-managed Google OAuth (cookie + Bearer)
-- LLM: Gemini 3 Flash via EMERGENT_LLM_KEY (with graceful deterministic fallbacks)
+## Overview
+AI career platform (LinkedIn + Indeed + ChatGPT + LeetCode). Dark UI (black + orange #FF5A1F, Clash Display + Satoshi fonts). React + FastAPI + MongoDB + Gemini 3 Flash via Emergent LLM key.
 
 ## Personas
-- Student / Fresher preparing for first job
-- Working professional switching roles
-- Recruiter (future phase)
+Students / freshers / working professionals switching roles + recruiters.
 
-## MVP – Implemented (Feb 2026)
-1. Landing (hero, features grid, CTA) — /
-2. Auth: Register, Login, Emergent Google, AuthCallback — /login, /register
-3. Dashboard shell with 11-item sidebar — /app
-4. Aggregated Dashboard (ATS, skill match, interview avg, applications funnel)
-5. Profile editor (bio, links, skills chips, preferred roles, salary, mode)
-6. Resume upload (PDF/DOCX) → AI parse via Gemini → editable cards
-7. ATS Score analyzer (100-point + 6 sub-scores + strengths/weaknesses/improvements)
-8. Skill Gap Analysis (target-role match %, missing/priority skills, resources)
-9. Career Roadmap timeline (7 phases: Foundation → Job Ready)
-10. Job Recommendations feed (12 seeded jobs, sorted by match %, filters)
-11. Job Match Score modal + Save/Apply
-12. AI Career Coach chatbot (persistent history)
-13. AI Mock Interview: HR / Technical / Behavioral / Managerial × Easy/Medium/Hard, 5-question flow, evaluation with 6 sub-scores
-14. Cover Letter Generator (tailored per company + JD, save history)
-15. Application Tracker Kanban (Saved / Applied / Interview / Offer / Rejected)
+## Phase 1 – MVP (Feb 2026)
+Auth (email/password + Emergent Google), Profile, Resume upload+AI parse, ATS Score, Skill Gap, Career Roadmap, 12 seeded Jobs w/ Match %, AI Career Coach chat, Mock Interview (4 rounds × 3 difficulties), Cover Letter, Kanban Application Tracker.
 
-## Backlog (P1/P2)
-- Coding sandbox with test cases (Python/Java/JS/C++) — LeetCode-style
-- Voice / video mock interview (STT/TTS via ElevenLabs / OpenAI Whisper)
-- Real job API (LinkedIn/Indeed) instead of seed
-- Recruiter portal (JD upload, candidate ranking, ATS screening)
-- Admin panel (users, jobs, analytics)
-- Notifications + email verification + 2FA
-- Calendar (interview schedule, deadlines)
-- Resume Builder w/ PDF templates
-- Portfolio Generator (Step 8C)
-- Career Twin recalculation before/after comparison
-- Gamification badges & streaks
-- Daily challenges
-- Hired celebration screen with confetti
+## Phase 2 – 17-step workflow (Feb 2026, iteration_2 100% tests pass)
+- **Step 5 · Career Twin** — hiring probability, salary prediction, industry demand, competition, readiness score, time-to-ready
+- **Step 8 · Preparation Hub** — Learning Hub (courses+videos+roadmaps), Resume Optimizer (before/after with ATS delta), Portfolio Generator (theme + public shareable URL)
+- **Step 10 · Coding Assessment** — coding (in-browser JS execution + tests), MCQ, SQL, aptitude, debugging
+- **Step 11 · Career Twin Recalc** — before/after comparison + boost %
+- **Step 13 · App Assistant** — cold email + checklist + resume tips + interview reminder
+- **Step 14 · Recruiter Dashboard** — JD upload + AI candidate ranking + shortlist (8 seeded candidates)
+- **Step 15 · Analytics** — Recharts line/bar/pie + PDF download via jsPDF
+- **Step 16 · Hired!** — canvas-confetti celebration + shareable text
+- **PipelineTracker** — 17 step chips at top of every app page
+- **Time-based greeting** ("Good morning/afternoon/evening/night, {name}")
+- **Global widgets** — ChatWidget FAB (persistent AI coach popover), BadgesDrawer FAB (9 badges), Dashboard "Download report" PDF
+- **Interview voice mode** — 🔊 speak question + 🎤 record answer (Web Speech API)
+- **Resume** — LinkedIn URL import (mocked, no OAuth key required) + version history
+- **Public** — /portfolio/{slug} publicly-shareable portfolio page
 
-## Key files
-- Backend: /app/backend/server.py (single-file API — 24 endpoints)
-- Frontend: /app/frontend/src/App.js, /app/frontend/src/pages/*.jsx (13 pages), /app/frontend/src/lib/{api,auth}.js(x)
-- Env: /app/backend/.env (MONGO_URL, DB_NAME, EMERGENT_LLM_KEY, JWT_SECRET)
-- Design: /app/design_guidelines.json
+## Backlog
+- Real STT/TTS (ElevenLabs/OpenAI) if user wants studio-quality voice
+- Real LinkedIn OAuth (needs partnership approval)
+- Live job APIs (Indeed/LinkedIn/Naukri)
+- Admin panel + notifications + calendar + 2FA
+- Refactor server.py (1155 lines) into routers/ modules (mentioned by testing agent)
+
+## Test credentials
+- Email: demo@jobrecipe.ai  Password: Demo@1234
