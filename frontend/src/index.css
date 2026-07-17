@@ -92,3 +92,6 @@ h1, h2, h3, h4, h5, h6, .font-display { font-family: 'Clash Display', sans-serif
 
 /* Kanban */
 .kanban-col { background: rgba(10,10,10,0.7); border: 1px solid rgba(255,255,255,0.08); border-radius: 1rem; padding: 1rem; min-height: 60vh; }
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

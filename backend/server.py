@@ -741,6 +741,397 @@ async def dashboard(user=Depends(get_current_user)):
 async def root():
     return {"message": "Job Recipe API", "ok": True}
 
+# ---------- Phase 2: Career Twin ----------
+class CareerTwinIn(BaseModel):
+    target_role: str
+
+@api.post("/career-twin")
+async def career_twin(body: CareerTwinIn, user=Depends(get_current_user)):
+    doc = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    skills = (doc.get("resume_parsed", {}) or {}).get("skills", []) + (doc.get("profile", {}) or {}).get("skills", [])
+    ats = (doc.get("ats_result") or {}).get("ats_score", 40)
+    match = (doc.get("skill_gap") or {}).get("match_percentage", 0)
+    system = "You are an AI career predictor. Return STRICT JSON only."
+    prompt = f"""Predict career metrics for role={body.target_role}. User has skills={skills[:15]}, ats={ats}, skill_match={match}.
+Return JSON:
+{{"hiring_probability": <0-100>, "salary_prediction": "<e.g. ₹8-14 LPA>", "industry_demand": <0-100>, "competition_level": <0-100>, "readiness_score": <0-100>, "time_to_ready_weeks": <int>, "verdict": "one sentence"}}
+Return ONLY JSON."""
+    raw = await call_llm(system, prompt)
+    data = extract_json(raw)
+    if not data or "hiring_probability" not in data:
+        base = min(int((ats + match) / 2), 95)
+        data = {
+            "hiring_probability": max(base, 25),
+            "salary_prediction": "₹6-14 LPA" if base < 60 else "₹12-24 LPA",
+            "industry_demand": 78,
+            "competition_level": 68,
+            "readiness_score": base,
+            "time_to_ready_weeks": max(4, 20 - int(base / 6)),
+            "verdict": "Solid foundation. Close the skill gaps to accelerate readiness.",
+        }
+    await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"career_twin": data, "target_role": body.target_role}})
+    return data
+
+@api.get("/career-twin")
+async def get_career_twin(user=Depends(get_current_user)):
+    doc = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0, "career_twin": 1})
+    return doc.get("career_twin", {}) if doc else {}
+
+@api.post("/career-twin/recalc")
+async def career_twin_recalc(body: CareerTwinIn, user=Depends(get_current_user)):
+    doc = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    before = doc.get("career_twin") or {"hiring_probability": 32, "salary_prediction": "₹5 LPA", "readiness_score": 48}
+    # Simulated "after" based on completed steps (has resume, ats, skill_gap, interviews)
+    has_resume = bool(doc.get("resume_text"))
+    has_ats = bool(doc.get("ats_result"))
+    has_gap = bool(doc.get("skill_gap"))
+    interview_count = await db.interviews.count_documents({"user_id": user["user_id"], "evaluation": {"$exists": True}})
+    boost = 10 + (15 if has_resume else 0) + (12 if has_ats else 0) + (10 if has_gap else 0) + min(interview_count * 4, 20)
+    after = {
+        "hiring_probability": min(before.get("hiring_probability", 32) + boost, 95),
+        "salary_prediction": "₹12 LPA" if boost > 30 else "₹8 LPA",
+        "readiness_score": min(before.get("readiness_score", 48) + boost, 96),
+    }
+    return {"before": before, "after": after, "boost": boost}
+
+# ---------- Phase 2: Coding Assessment ----------
+class CodingStartIn(BaseModel):
+    kind: str  # coding, mcq, sql, aptitude, debugging
+    difficulty: str = "Medium"
+
+class CodingSubmitIn(BaseModel):
+    assessment_id: str
+    answers: List[Dict[str, Any]]  # [{q_index, answer}]
+
+CODING_BANK = {
+    "coding": [
+        {"q": "Write a function `sumArray(arr)` that returns the sum of numbers in an array.", "template": "function sumArray(arr) {\n  // your code\n}", "tests": [{"input": "[1,2,3]", "expected": "6"}, {"input": "[10,-5,5]", "expected": "10"}]},
+        {"q": "Write `isPalindrome(str)` returning true if the string reads the same forwards and backwards.", "template": "function isPalindrome(str) {\n  // your code\n}", "tests": [{"input": "'racecar'", "expected": "true"}, {"input": "'hello'", "expected": "false"}]},
+        {"q": "Write `fibonacci(n)` returning the nth Fibonacci number (0-indexed).", "template": "function fibonacci(n) {\n  // your code\n}", "tests": [{"input": "0", "expected": "0"}, {"input": "6", "expected": "8"}]},
+    ],
+    "mcq": [
+        {"q": "What is the time complexity of binary search?", "options": ["O(1)", "O(log n)", "O(n)", "O(n log n)"], "answer": 1},
+        {"q": "Which data structure uses LIFO?", "options": ["Queue", "Stack", "Tree", "Graph"], "answer": 1},
+        {"q": "HTTP status code 404 means?", "options": ["OK", "Not Found", "Server Error", "Redirect"], "answer": 1},
+        {"q": "In React, what triggers a re-render?", "options": ["console.log", "State/prop change", "CSS change", "None"], "answer": 1},
+        {"q": "SQL: which clause filters rows before grouping?", "options": ["HAVING", "WHERE", "ORDER BY", "GROUP BY"], "answer": 1},
+    ],
+    "sql": [
+        {"q": "Write a SQL query to get all users older than 25 from the `users` table.", "template": "SELECT * FROM users WHERE ...", "expected_keywords": ["select", "from", "users", "age", ">", "25"]},
+        {"q": "Write a query to count orders per customer from `orders`.", "template": "SELECT customer_id, COUNT(*) ...", "expected_keywords": ["count", "group by", "orders"]},
+    ],
+    "aptitude": [
+        {"q": "If 5 workers finish a task in 12 days, how many days will 10 workers take?", "options": ["6", "12", "24", "3"], "answer": 0},
+        {"q": "A train covers 60 km in 45 min. What is its speed in km/h?", "options": ["60", "75", "80", "90"], "answer": 2},
+        {"q": "Which number completes: 2, 6, 12, 20, __ ?", "options": ["24", "28", "30", "32"], "answer": 2},
+    ],
+    "debugging": [
+        {"q": "Fix this JS: `function add(a,b){ return a + b; }; add(2)` — what's the bug?", "options": ["Nothing", "Missing argument default", "Syntax", "Return type"], "answer": 1},
+        {"q": "Why does `for(var i=0;i<3;i++) setTimeout(()=>console.log(i),0)` print 3 three times?", "options": ["Bug in JS", "var is function-scoped", "setTimeout is async only", "None"], "answer": 1},
+    ],
+}
+
+@api.post("/coding/assessment/start")
+async def coding_start(body: CodingStartIn, user=Depends(get_current_user)):
+    bank = CODING_BANK.get(body.kind, CODING_BANK["mcq"])
+    aid = f"as_{uuid.uuid4().hex[:10]}"
+    doc = {"assessment_id": aid, "user_id": user["user_id"], "kind": body.kind, "difficulty": body.difficulty,
+           "questions": bank, "started_at": now_utc().isoformat()}
+    await db.assessments.insert_one(doc)
+    return {"assessment_id": aid, "kind": body.kind, "questions": bank}
+
+@api.post("/coding/assessment/submit")
+async def coding_submit(body: CodingSubmitIn, user=Depends(get_current_user)):
+    doc = await db.assessments.find_one({"assessment_id": body.assessment_id, "user_id": user["user_id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Not found")
+    correct = 0
+    total = len(doc["questions"])
+    details = []
+    for ans in body.answers:
+        idx = ans.get("q_index", 0)
+        if idx >= total:
+            continue
+        q = doc["questions"][idx]
+        user_answer = ans.get("answer", "")
+        is_ok = False
+        if "answer" in q:  # MCQ / aptitude / debugging
+            is_ok = int(user_answer) == q["answer"]
+        elif "expected_keywords" in q:  # SQL — keyword check
+            low = str(user_answer).lower()
+            is_ok = all(k in low for k in q["expected_keywords"])
+        elif "tests" in q:  # coding — evaluated client-side; trust submitted result
+            is_ok = bool(user_answer)
+        if is_ok:
+            correct += 1
+        details.append({"q_index": idx, "correct": is_ok})
+    score = int(round((correct / total) * 100)) if total else 0
+    await db.assessments.update_one({"assessment_id": body.assessment_id}, {"$set": {"score": score, "correct": correct, "total": total, "submitted_at": now_utc().isoformat(), "details": details}})
+    return {"score": score, "correct": correct, "total": total, "details": details}
+
+# ---------- Phase 2: Preparation Hub ----------
+class LearningIn(BaseModel):
+    skills: List[str] = []
+
+@api.post("/learning/recommend")
+async def learning_recommend(body: LearningIn, user=Depends(get_current_user)):
+    if not body.skills:
+        doc = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0, "skill_gap": 1})
+        body.skills = (doc.get("skill_gap") or {}).get("priority_skills", ["Python", "React", "SQL"])
+    def resources(skill):
+        s = skill.strip()
+        return {
+            "skill": s,
+            "courses": [
+                {"title": f"{s} — The Complete Guide", "provider": "Coursera", "hours": 24, "url": f"https://www.coursera.org/search?query={s}"},
+                {"title": f"Learn {s} in 30 days", "provider": "Udemy", "hours": 18, "url": f"https://www.udemy.com/courses/search/?q={s}"},
+            ],
+            "videos": [
+                {"title": f"{s} crash course", "channel": "freeCodeCamp", "url": f"https://www.youtube.com/results?search_query={s}+crash+course"},
+                {"title": f"{s} interview prep", "channel": "Traversy Media", "url": f"https://www.youtube.com/results?search_query={s}+interview"},
+            ],
+            "roadmaps": [{"title": f"{s} Roadmap", "url": f"https://roadmap.sh/?q={s}"}],
+            "practice": [{"title": f"{s} exercises", "url": f"https://leetcode.com/problemset/?search={s}"}],
+        }
+    return {"tracks": [resources(s) for s in body.skills[:6]]}
+
+class ResumeOptimizeIn(BaseModel):
+    text: str
+
+@api.post("/resume/optimize")
+async def resume_optimize(body: ResumeOptimizeIn, user=Depends(get_current_user)):
+    system = "You are a resume rewriter. Return STRICT JSON only."
+    prompt = f"""Rewrite these resume bullets with strong action verbs, quantified impact, and ATS-friendly keywords. Return JSON:
+{{"optimized": "<full rewritten text>", "ats_delta": <+N>, "improvements": ["bullet 1", "bullet 2"]}}
+
+ORIGINAL:
+{body.text[:3000]}
+
+Return ONLY JSON."""
+    raw = await call_llm(system, prompt)
+    data = extract_json(raw)
+    if not data or "optimized" not in data:
+        # Simple fallback: replace weak verbs
+        rewrite = re.sub(r"\b(worked on|helped with|did|made)\b", "delivered", body.text, flags=re.I)
+        rewrite = re.sub(r"\b(responsible for)\b", "led", rewrite, flags=re.I)
+        data = {"optimized": rewrite, "ats_delta": 8, "improvements": ["Replaced weak verbs with strong action verbs", "Added quantifiable language"]}
+    return data
+
+class PortfolioIn(BaseModel):
+    theme: str = "midnight"
+    include_projects: bool = True
+
+@api.post("/portfolio/generate")
+async def portfolio_generate(body: PortfolioIn, user=Depends(get_current_user)):
+    doc = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    slug = f"p-{uuid.uuid4().hex[:8]}"
+    prof = doc.get("profile", {}) or {}
+    parsed = doc.get("resume_parsed", {}) or {}
+    portfolio = {
+        "slug": slug,
+        "user_id": user["user_id"],
+        "name": doc["name"],
+        "email": doc["email"],
+        "theme": body.theme,
+        "bio": prof.get("bio", ""),
+        "links": {"linkedin": prof.get("linkedin", ""), "github": prof.get("github", ""), "portfolio": prof.get("portfolio", "")},
+        "skills": parsed.get("skills", []) + prof.get("skills", []),
+        "projects": parsed.get("projects", []) if body.include_projects else [],
+        "experience": parsed.get("experience", []),
+        "education": parsed.get("education", []),
+        "created_at": now_utc().isoformat(),
+    }
+    await db.portfolios.insert_one(portfolio)
+    return {"slug": slug, "url": f"/portfolio/{slug}"}
+
+@api.get("/portfolio/{slug}")
+async def get_portfolio(slug: str):
+    p = await db.portfolios.find_one({"slug": slug}, {"_id": 0, "user_id": 0, "email": 0})
+    if not p:
+        raise HTTPException(404, "Not found")
+    return p
+
+# ---------- Phase 2: Resume Versions ----------
+@api.post("/resume/versions")
+async def save_resume_version(user=Depends(get_current_user)):
+    doc = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    v = {
+        "version_id": f"v_{uuid.uuid4().hex[:8]}",
+        "user_id": user["user_id"],
+        "text": doc.get("resume_text", ""),
+        "filename": doc.get("resume_filename", ""),
+        "ats_score": (doc.get("ats_result") or {}).get("ats_score", 0),
+        "created_at": now_utc().isoformat(),
+    }
+    await db.resume_versions.insert_one(v)
+    return {"version_id": v["version_id"]}
+
+@api.get("/resume/versions")
+async def list_resume_versions(user=Depends(get_current_user)):
+    items = await db.resume_versions.find({"user_id": user["user_id"]}, {"_id": 0, "text": 0}).sort("created_at", -1).to_list(50)
+    return items
+
+# ---------- Phase 2: Application Assistant ----------
+class AppAssistantIn(BaseModel):
+    job_id: Optional[str] = None
+    company: str
+    role: str
+    hiring_manager: Optional[str] = ""
+
+@api.post("/application-assistant")
+async def application_assistant(body: AppAssistantIn, user=Depends(get_current_user)):
+    doc = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    resume = doc.get("resume_text", "")[:2500]
+    system = "You are a job-application assistant. Return STRICT JSON only."
+    prompt = f"""For {user['name']} applying to {body.role} at {body.company}, return JSON with:
+{{
+  "cold_email": "<200 word outreach email>",
+  "checklist": ["...5-7 pre-application steps..."],
+  "resume_tips": ["3 tailoring tips"],
+  "reminder": "one-line interview prep reminder"
+}}
+Resume: {resume}
+Return ONLY JSON."""
+    raw = await call_llm(system, prompt)
+    data = extract_json(raw)
+    if not data or "cold_email" not in data:
+        data = {
+            "cold_email": f"Hi {body.hiring_manager or 'Hiring Team'},\n\nI'm {user['name']}, and I recently came across the {body.role} role at {body.company}. My background aligns well with your team's mission, and I'd love the chance to contribute. I've attached my resume for your review — would you have 15 minutes for a quick chat this week?\n\nBest,\n{user['name']}",
+            "checklist": ["Update resume with latest projects", "Tailor cover letter to JD keywords", "Research 3 recent company news items", "Prepare 5 STAR stories", "List 3 questions to ask the interviewer", "Confirm salary expectations", "Test video/audio setup"],
+            "resume_tips": ["Front-load matching keywords in your summary", "Quantify every achievement (numbers/%)", "Trim to 1 page for <5 yrs experience"],
+            "reminder": f"Interview for {body.role} @ {body.company} — review your top 3 projects tonight.",
+        }
+    return data
+
+# ---------- Phase 2: Recruiter ----------
+SEED_CANDIDATES = [
+    {"cand_id": "c001", "name": "Aditi Sharma", "email": "aditi@example.com", "skills": ["Python", "Django", "PostgreSQL", "AWS", "Docker"], "experience_years": 3, "location": "Bangalore", "current_role": "Backend Engineer"},
+    {"cand_id": "c002", "name": "Rahul Verma", "email": "rahul@example.com", "skills": ["React", "TypeScript", "Node.js", "MongoDB", "GraphQL"], "experience_years": 4, "location": "Mumbai", "current_role": "Full Stack Dev"},
+    {"cand_id": "c003", "name": "Priya Nair", "email": "priya@example.com", "skills": ["Machine Learning", "Python", "PyTorch", "SQL", "Statistics"], "experience_years": 2, "location": "Remote", "current_role": "Data Scientist"},
+    {"cand_id": "c004", "name": "Karthik Iyer", "email": "karthik@example.com", "skills": ["AWS", "Kubernetes", "Terraform", "CI/CD", "Linux"], "experience_years": 5, "location": "Hyderabad", "current_role": "DevOps Engineer"},
+    {"cand_id": "c005", "name": "Sneha Kapoor", "email": "sneha@example.com", "skills": ["Figma", "UX Research", "Design Systems", "Prototyping"], "experience_years": 3, "location": "Delhi", "current_role": "UI/UX Designer"},
+    {"cand_id": "c006", "name": "Arjun Rao", "email": "arjun@example.com", "skills": ["Java", "Spring Boot", "Microservices", "Kafka", "Redis"], "experience_years": 6, "location": "Pune", "current_role": "Senior Backend"},
+    {"cand_id": "c007", "name": "Meera Patel", "email": "meera@example.com", "skills": ["React", "Redux", "CSS", "Jest", "TypeScript"], "experience_years": 2, "location": "Remote", "current_role": "Frontend Dev"},
+    {"cand_id": "c008", "name": "Vikram Singh", "email": "vikram@example.com", "skills": ["Python", "Data Analysis", "SQL", "Power BI", "Tableau"], "experience_years": 3, "location": "Gurgaon", "current_role": "Data Analyst"},
+]
+
+async def seed_candidates():
+    if await db.candidates.count_documents({}) == 0:
+        for c in SEED_CANDIDATES:
+            await db.candidates.insert_one(c)
+
+class RecruiterRankIn(BaseModel):
+    job_description: str
+    required_skills: List[str] = []
+
+@api.post("/recruiter/rank")
+async def recruiter_rank(body: RecruiterRankIn, user=Depends(get_current_user)):
+    if not body.required_skills:
+        # Extract naive keywords
+        body.required_skills = [w for w in re.findall(r"[A-Za-z][A-Za-z+.#]{2,}", body.job_description) if w.lower() in {"python","react","node","aws","docker","kubernetes","java","sql","typescript","mongodb","postgresql","django","kafka","redis","figma","ml","pytorch","terraform"}][:8] or ["Python", "React"]
+    candidates = await db.candidates.find({}, {"_id": 0}).to_list(200)
+    req = {s.lower() for s in body.required_skills}
+    ranked = []
+    for c in candidates:
+        cs = {s.lower() for s in c["skills"]}
+        matched = req & cs
+        score = int(round((len(matched) / max(len(req), 1)) * 100))
+        ranked.append({**c, "match_score": score, "matched_skills": list(matched), "missing_skills": list(req - cs)})
+    ranked.sort(key=lambda x: x["match_score"], reverse=True)
+    return {"required_skills": body.required_skills, "candidates": ranked}
+
+@api.get("/recruiter/candidates")
+async def recruiter_candidates():
+    cs = await db.candidates.find({}, {"_id": 0}).to_list(200)
+    return cs
+
+# ---------- Phase 2: Analytics ----------
+@api.get("/analytics")
+async def analytics(user=Depends(get_current_user)):
+    doc = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    apps = await db.applications.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
+    interviews = await db.interviews.find({"user_id": user["user_id"]}, {"_id": 0}).sort("started_at", 1).to_list(200)
+    versions = await db.resume_versions.find({"user_id": user["user_id"]}, {"_id": 0, "text": 0}).sort("created_at", 1).to_list(50)
+    status_counts: Dict[str, int] = {}
+    for a in apps:
+        status_counts[a["status"]] = status_counts.get(a["status"], 0) + 1
+    interview_timeline = [{"date": i["started_at"][:10], "score": i.get("evaluation", {}).get("overall_score", 0)} for i in interviews if i.get("evaluation")]
+    resume_timeline = [{"date": v["created_at"][:10], "ats": v.get("ats_score", 0)} for v in versions]
+    total_apps = len(apps)
+    offers = status_counts.get("offer", 0)
+    success_rate = int(round((offers / total_apps) * 100)) if total_apps else 0
+    # Streak: consecutive days with any activity (interview or version)
+    activity_dates = sorted({i["started_at"][:10] for i in interviews} | {v["created_at"][:10] for v in versions})
+    streak = 0
+    if activity_dates:
+        streak = 1
+        for i in range(len(activity_dates) - 1, 0, -1):
+            d1 = datetime.fromisoformat(activity_dates[i])
+            d0 = datetime.fromisoformat(activity_dates[i - 1])
+            if (d1 - d0).days <= 2:
+                streak += 1
+            else:
+                break
+    return {
+        "total_applications": total_apps,
+        "success_rate": success_rate,
+        "interview_success": int(round(sum(1 for i in interviews if i.get("evaluation", {}).get("overall_score", 0) >= 70) / max(len(interviews), 1) * 100)),
+        "learning_streak": streak,
+        "status_counts": status_counts,
+        "interview_timeline": interview_timeline,
+        "resume_timeline": resume_timeline,
+        "skills_learned": len((doc.get("skill_gap") or {}).get("strengths", [])),
+    }
+
+# ---------- Phase 2: Badges & Hired ----------
+@api.get("/badges")
+async def badges(user=Depends(get_current_user)):
+    doc = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    ats = (doc.get("ats_result") or {}).get("ats_score", 0)
+    interviews = await db.interviews.count_documents({"user_id": user["user_id"], "evaluation": {"$exists": True}})
+    apps = await db.applications.count_documents({"user_id": user["user_id"]})
+    all_badges = [
+        {"id": "profile-complete", "title": "Profile Pro", "desc": "Filled out complete profile", "unlocked": bool((doc.get("profile") or {}).get("bio"))},
+        {"id": "first-resume", "title": "First Recipe", "desc": "Uploaded first resume", "unlocked": bool(doc.get("resume_text"))},
+        {"id": "ats-80", "title": "ATS 80+", "desc": "Achieved ATS score of 80+", "unlocked": ats >= 80},
+        {"id": "ats-90", "title": "ATS Master", "desc": "Achieved ATS score of 90+", "unlocked": ats >= 90},
+        {"id": "interview-ace", "title": "Interview Ace", "desc": "Completed 5+ mock interviews", "unlocked": interviews >= 5},
+        {"id": "first-app", "title": "Off to the Races", "desc": "Applied to first job", "unlocked": apps >= 1},
+        {"id": "ten-apps", "title": "Persistent", "desc": "Applied to 10+ jobs", "unlocked": apps >= 10},
+        {"id": "career-twin", "title": "Twin Activated", "desc": "Ran your AI Career Twin", "unlocked": bool(doc.get("career_twin"))},
+        {"id": "hired", "title": "HIRED!", "desc": "Landed a job offer", "unlocked": bool(doc.get("hired_at"))},
+    ]
+    return {"badges": all_badges, "unlocked_count": sum(1 for b in all_badges if b["unlocked"]), "total": len(all_badges)}
+
+@api.post("/hired")
+async def mark_hired(user=Depends(get_current_user)):
+    await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"hired_at": now_utc().isoformat()}})
+    return {"ok": True, "message": "Congratulations! 🎉"}
+
+# ---------- Phase 2: LinkedIn Mock Import ----------
+class LinkedInIn(BaseModel):
+    profile_url: str
+
+@api.post("/linkedin/import")
+async def linkedin_import(body: LinkedInIn, user=Depends(get_current_user)):
+    # Mock LinkedIn import (no official API without OAuth partner). Returns fabricated but realistic data.
+    handle = body.profile_url.rstrip("/").split("/")[-1] or "candidate"
+    parsed = {
+        "skills": ["Python", "React", "SQL", "AWS", "Docker", "Git", "REST APIs", "System Design"],
+        "education": [{"degree": "B.Tech Computer Science", "institution": "IIT Delhi", "year": "2020"}],
+        "experience": [{"title": "Software Engineer", "company": "Freshworks", "duration": "2020-2023", "description": "Built scalable microservices for SaaS platform."}],
+        "projects": [{"name": "Portfolio Site", "description": "Personal portfolio built with Next.js", "tech": ["Next.js", "Tailwind"]}],
+        "certifications": ["AWS Cloud Practitioner"],
+        "achievements": ["Speaker at PyCon India 2022"],
+        "languages": ["English", "Hindi"],
+        "contact": {"linkedin": body.profile_url},
+    }
+    await db.users.update_one({"user_id": user["user_id"]}, {"$set": {
+        "resume_parsed": parsed, "resume_text": f"Imported from LinkedIn: {handle}",
+        "resume_filename": f"linkedin-{handle}.imported", "resume_uploaded_at": now_utc().isoformat(),
+    }})
+    return {"parsed": parsed, "source": "linkedin_mock"}
+
 app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
@@ -755,6 +1146,7 @@ logger = logging.getLogger(__name__)
 @app.on_event("startup")
 async def on_start():
     await seed_jobs()
+    await seed_candidates()
     logger.info("Job Recipe backend ready")
 
 @app.on_event("shutdown")

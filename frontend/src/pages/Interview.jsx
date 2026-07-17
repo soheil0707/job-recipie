@@ -75,9 +75,22 @@ export default function Interview() {
 
       {state.interview_id && !state.done && (
         <div className="card">
-          <div className="text-xs uppercase tracking-widest text-white/50">Question {state.index + 1} / {state.total}</div>
+          <div className="flex items-center justify-between">
+            <div className="text-xs uppercase tracking-widest text-white/50">Question {state.index + 1} / {state.total}</div>
+            <div className="flex gap-2">
+              <button data-testid="int-speak" onClick={()=>{ if('speechSynthesis' in window){ const u = new SpeechSynthesisUtterance(state.question); u.rate = 0.95; window.speechSynthesis.cancel(); window.speechSynthesis.speak(u);} }} className="text-xs px-3 py-1 rounded-full border border-white/15 hover:border-[#FF5A1F]/40">🔊 Hear question</button>
+              <button data-testid="int-mic" onClick={()=>{
+                const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (!SR) { toast.error("Voice not supported in this browser"); return; }
+                const rec = new SR(); rec.lang = 'en-US'; rec.continuous = false; rec.interimResults = false;
+                rec.onresult = (e) => { const t = e.results[0][0].transcript; setAnswer(a => (a ? a + " " : "") + t); toast.success("Captured"); };
+                rec.onerror = () => toast.error("Mic error");
+                rec.start();
+              }} className="text-xs px-3 py-1 rounded-full border border-white/15 hover:border-[#FF5A1F]/40">🎤 Record answer</button>
+            </div>
+          </div>
           <div className="mt-2 font-display text-2xl">{state.question}</div>
-          <textarea data-testid="int-answer" rows={6} value={answer} onChange={e=>setAnswer(e.target.value)} placeholder="Type your answer…" className="mt-4 w-full px-4 py-3 rounded-xl bg-[#0A0A0A] border border-white/10 focus:border-[#FF5A1F] outline-none" />
+          <textarea data-testid="int-answer" rows={6} value={answer} onChange={e=>setAnswer(e.target.value)} placeholder="Type or record your answer…" className="mt-4 w-full px-4 py-3 rounded-xl bg-[#0A0A0A] border border-white/10 focus:border-[#FF5A1F] outline-none" />
           <button data-testid="int-submit" onClick={submit} disabled={busy} className="btn-primary mt-3">{busy?"Submitting…":"Submit & next"}</button>
         </div>
       )}
